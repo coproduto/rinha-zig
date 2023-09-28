@@ -1,19 +1,8 @@
 const std = @import("std");
 
-const ParsedJson = std.json.Parsed;
 const JsonParseError = std.json.ParseError;
 const JsonParseFromValueError = std.json.ParseFromValueError;
 const DynamicJsonValue = std.json.Value;
-
-// TODO: Implementar funções e chamadas.
-// Para implementar funções precisaremos de duas coisas:
-// Contextos terão que poder ser pilhas de contextos.
-// Além disso, funções podem capturar variáveis locais referenciadas nelas.
-// Para isso, precisaremos que funções possam carregar um contexto próprio incluindo o contexto delas.
-// Isso será representado pela struct RinhaClosure. A parte importante disso é que, na hora em que uma closure
-// sair de escopo (como determinar isso?) o contexto local dela deverá ser desalocado.
-// Talvez inicialmente seja melhor deixar closures "vazarem" e serem desalocadas com a arena inteira.
-// Depois posso determinar uma estratégia mais viável pra lidar com elas.
 
 const LocationMetadata = struct {
     start: u64,
