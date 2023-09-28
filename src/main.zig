@@ -98,6 +98,45 @@ const BinaryOpTag = enum {
     gte_binop,
     and_binop,
     or_binop,
+
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) JsonParseError(@TypeOf(source.*))!@This() {
+        var parsed = try std.json.innerParse(DynamicJsonValue, allocator, source, options);
+        return jsonParseFromValue(allocator, parsed, options);
+    }
+
+    pub fn jsonParseFromValue(
+        _: std.mem.Allocator,
+        source: DynamicJsonValue,
+        _: std.json.ParseOptions,
+    ) JsonParseFromValueError!@This() {
+        switch (source) {
+            DynamicJsonValue.string => |op_string| {
+                return parseOpString(op_string) orelse JsonParseFromValueError.InvalidEnumTag;
+            },
+            else => return JsonParseFromValueError.InvalidEnumTag,
+        }
+    }
+
+    fn parseOpString(op_string: []const u8) ?@This() {
+        if (std.mem.eql(u8, op_string, "Add")) return @This().add_binop;
+        if (std.mem.eql(u8, op_string, "Sub")) return @This().sub_binop;
+        if (std.mem.eql(u8, op_string, "Mul")) return @This().mul_binop;
+        if (std.mem.eql(u8, op_string, "Div")) return @This().div_binop;
+        if (std.mem.eql(u8, op_string, "Rem")) return @This().rem_binop;
+        if (std.mem.eql(u8, op_string, "Eq")) return @This().eq_binop;
+        if (std.mem.eql(u8, op_string, "Neq")) return @This().neq_binop;
+        if (std.mem.eql(u8, op_string, "Lt")) return @This().lt_binop;
+        if (std.mem.eql(u8, op_string, "Gt")) return @This().gt_binop;
+        if (std.mem.eql(u8, op_string, "Lte")) return @This().lte_binop;
+        if (std.mem.eql(u8, op_string, "Gte")) return @This().gte_binop;
+        if (std.mem.eql(u8, op_string, "And")) return @This().and_binop;
+        if (std.mem.eql(u8, op_string, "Or")) return @This().or_binop;
+        return null;
+    }
 };
 
 const BinaryOpNode = struct {
@@ -157,7 +196,6 @@ const TermNode = union(TermNodeTag) {
             DynamicJsonValue.object => |object_map| {
                 const maybe_kind_string = object_map.get("kind");
                 if (maybe_kind_string) |kind_string| {
-                    // std.debug.print("{}", .{kind_string});
                     switch (kind_string) {
                         DynamicJsonValue.string => |valid_string| {
                             return parseByKindString(allocator, source, options, valid_string);
@@ -204,7 +242,7 @@ const TermNode = union(TermNodeTag) {
         }
     }
 
-    fn parseInnerNode(comptime T: type, comptime field_name: []const u8, allocator: std.mem.Allocator, source: DynamicJsonValue, options: std.json.ParseOptions) JsonParseFromValueError!@This() {
+    fn parseInnerNode(comptime T: type, comptime field_name: []const u8, allocator: std.mem.Allocator, source: DynamicJsonValue, options: std.json.ParseOptions) JsonParseFromValueError!@This() {        
         var inner_node = try allocator.create(T);
         inner_node.* = try std.json.innerParseFromValue(T, allocator, source, options);
 
@@ -325,6 +363,12 @@ const RinhaValue = union(RinhaValueTag) {
             },
         }
     }
+
+    pub fn printNewline(self: @This()) !void {
+        try self.print();
+        const stdout = std.io.getStdOut().writer();
+        try stdout.print("\n", .{});
+    }
 };
 
 const EvalResult = struct {
@@ -357,6 +401,10 @@ const EvalContext = struct {
             .current = ContextMap.init(self.current.allocator),
             .parent = self,
         };
+    }
+
+    pub fn deinit_frame(self: *@This()) void {
+        self.current.deinit();
     }
 
     pub fn push_frame(self: *@This(), frame_map: ContextMap) @This() {
@@ -392,6 +440,10 @@ const EvalContext = struct {
         return self.current.remove(name);
     }
 };
+
+fn evalFile(allocator: std.mem.Allocator, term: *FileNode) EvalError!EvalResult {
+    return eval(allocator, term.expression);
+}
 
 fn eval(allocator: std.mem.Allocator, term: *TermNode) EvalError!EvalResult {
     var context = EvalContext.init(allocator);
@@ -480,7 +532,7 @@ fn evalWithContext(allocator: std.mem.Allocator, context: *EvalContext, term: *T
         },
         TermNodeTag.print_node => |print_node| {
             const value = try evalWithContext(allocator, context, print_node.value);
-            try value.print();
+            try value.printNewline();
             return RinhaValueTag.none;
         },
     };
@@ -499,15 +551,16 @@ fn evalCall(allocator: std.mem.Allocator, context: *EvalContext, call: *CallNode
             const argument_count = call.arguments.len;
             if (parameter_count != argument_count) return EvalError.ArgumentError;
 
+            var base_context = context.push_frame(closure.context.*);
+            var closure_context = base_context.new_frame();
+            defer closure_context.deinit_frame();
+            
             for (closure.args, call.arguments) |param, arg| {
                 const argument_value = try evalWithContext(allocator, context, @constCast(&arg));
-                try context.put(param.text, argument_value);
+                try closure_context.put(param.text, argument_value);
             }
-            var closure_context = context.push_frame(closure.context.*);
+
             const return_value = try evalWithContext(allocator, &closure_context, closure.value);
-            for (closure.args) |param| {
-                _ = context.remove(param.text);
-            }
 
             return return_value;
         },
@@ -534,8 +587,8 @@ fn evalBinopWithContext(allocator: std.mem.Allocator, context: *EvalContext, bin
             const lhs = try evalWithContext(allocator, context, binop.lhs);
             return switch (lhs) {
                 RinhaValueTag.boolean => |boolean_value| {
-                    if (!boolean_value) {
-                        return RinhaValue{ .boolean = false };
+                    if (boolean_value) {
+                        return RinhaValue{ .boolean = true };
                     } else {
                         return evalWithContext(allocator, context, binop.rhs);
                     }
@@ -556,7 +609,7 @@ fn evalEagerBinopWithContext(allocator: std.mem.Allocator, context: *EvalContext
         BinaryOpTag.add_binop => try lhs.performAddition(allocator, rhs) orelse EvalError.TypeError,
         else => {
             const int_lhs = try (lhs.extractInt() orelse EvalError.TypeError);
-            const int_rhs = try (lhs.extractInt() orelse EvalError.TypeError);
+            const int_rhs = try (rhs.extractInt() orelse EvalError.TypeError);
             return performArithmeticBinop(binop.op, int_lhs, int_rhs);
         }
     };
@@ -650,78 +703,20 @@ fn collectClosureContext(term: *TermNode, parent_context: *EvalContext, paramete
 }
 
 pub fn main() anyerror!void {
-    const s =
-        \\{
-        \\  "kind": "Let",
-        \\  "name": {
-        \\    "text": "test_var",
-        \\    "location": {
-        \\      "start": 0,
-        \\      "end": 1,
-        \\      "filename": "teste0.rinha"
-        \\    }
-        \\  },
-        \\  "value": {
-        \\    "kind": "Tuple",
-        \\    "first": {
-        \\      "kind": "Int",
-        \\      "value": 1,
-        \\      "location": {
-        \\        "start": 0,
-        \\        "end": 1,
-        \\        "filename": "teste0.rinha"
-        \\      }
-        \\    },
-        \\    "second": {
-        \\      "kind": "Str",
-        \\      "value": "string_teste",
-        \\      "location": {
-        \\        "start": 0,
-        \\        "end": 1,
-        \\        "filename": "teste0.rinha"
-        \\      }
-        \\    },
-        \\    "location": {
-        \\      "start": 0,
-        \\      "end": 1,
-        \\      "filename": "teste0.rinha"
-        \\    }
-        \\  },
-        \\  "next": {
-        \\    "kind": "First",
-        \\    "value": {
-        \\      "kind": "Var",
-        \\      "text": "test_var",
-        \\      "location": {
-        \\        "start": 0,
-        \\        "end": 1,
-        \\        "filename": "teste0.rinha"
-        \\      }
-        \\    },
-        \\    "location": {
-        \\      "start": 0,
-        \\      "end": 1,
-        \\      "filename": "teste0.rinha"
-        \\    }
-        \\  },
-        \\  "location": {
-        \\      "start": 0,
-        \\      "end": 1,
-        \\      "filename": "teste0.rinha"
-        \\  }
-        \\}
-    ;
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
+    
+    var f = try std.fs.openFileAbsolute("/var/rinha/source.rinha.json", .{});
+    var s = try f.readToEndAlloc(allocator, 1_000_000_000);
+    defer allocator.free(s);
 
-    const parsedData = try std.json.parseFromSlice(*TermNode, allocator, s, .{.ignore_unknown_fields = true});
+    const parsedData = try std.json.parseFromSlice(*FileNode, allocator, s, .{.ignore_unknown_fields = true});
     defer parsedData.deinit();
 
-    const result = try eval(allocator, parsedData.value);
+    const result = try evalFile(allocator, parsedData.value);
     defer result.deinit();
 
-    std.debug.print("{}\n", .{result.value});
+    try result.value.printNewline();
 }
